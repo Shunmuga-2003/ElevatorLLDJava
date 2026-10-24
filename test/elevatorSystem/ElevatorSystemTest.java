@@ -11,9 +11,27 @@ import elevatorSystem.Entity.SystemState;
 import elevatorSystem.controller.ElevatorController;
 import elevatorSystem.controller.ElevatorPanelController;
 import elevatorSystem.controller.FloorPanelController;
+import elevatorSystem.strategy.ElevatorSelectionStrategy;
+import elevatorSystem.strategy.LeastBusyStrategy;
+import elevatorSystem.strategy.NearestElevatorStrategy;
+import elevatorSystem.strategy.RoundRobinStrategy;
+import elevatorSystem.strategy.SelectionStrategyFactory;
+import elevatorSystem.strategy.StrategyType;
+import elevatorSystem.strategy.ZoneBasedStrategy;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,7 +45,11 @@ public class ElevatorSystemTest {
     private final ElevatorPanelController elevatorPanel;
 
     private ElevatorSystemTest() {
-        ElevatorSystem system = new ElevatorSystem(log::add);
+        this(new NearestElevatorStrategy());
+    }
+
+    private ElevatorSystemTest(ElevatorSelectionStrategy strategy) {
+        ElevatorSystem system = new ElevatorSystem(strategy, log::add);
         controller = system.getElevatorController();
         floorPanel = system.getFloorPanelController();
         elevatorPanel = system.getElevatorPanelController();
@@ -43,6 +65,13 @@ public class ElevatorSystemTest {
         failed += run("maintenance hands hall calls to another elevator", ElevatorSystemTest::maintenanceRequeuesHallCalls);
         failed += run("invalid requests are rejected", ElevatorSystemTest::invalidRequestsRejected);
         failed += run("graceful stop finishes outstanding requests", ElevatorSystemTest::gracefulStop);
+        failed += run("round robin hands calls out in turn", ElevatorSystemTest::roundRobinTakesTurns);
+        failed += run("least busy prefers the elevator with fewer stops", ElevatorSystemTest::leastBusyPrefersFewerStops);
+        failed += run("zone based sends calls to the zone's elevator", ElevatorSystemTest::zoneBasedUsesZoneOwner);
+        failed += run("strategy can be switched at runtime", ElevatorSystemTest::strategySwitchAtRuntime);
+        failed += run("factory builds every strategy type", ElevatorSystemTest::factoryBuildsEveryType);
+        failed += run("simultaneous presses of one button create one request", ElevatorSystemTest::concurrentDuplicatePresses);
+        failed += run("presses from many threads while the clock runs are all served", ElevatorSystemTest::concurrentPressesWhileTicking);
 
         System.out.println(failed == 0 ? "\nAll tests passed" : "\n" + failed + " test(s) failed");
         if (failed > 0) {
@@ -156,7 +185,141 @@ public class ElevatorSystemTest {
         assertTrue(t.log.stream().anyMatch(l -> l.contains("(" + SystemState.STOPPED)), "status should be STOPPED");
     }
 
+    private static void roundRobinTakesTurns() {
+        ElevatorSystemTest t = new ElevatorSystemTest(new RoundRobinStrategy());
+        String b = t.building(3);
+        List<Elevator> elevators = t.controller.getElevators(b);
+        // every elevator is parked at floor 0, yet the calls are spread E1, E2, E3, E1
+        assertEquals(elevators.get(0).getElevatorId(), t.floorPanel.pressButton(b, 1, Direction.UP).getAssignedElevatorId());
+        assertEquals(elevators.get(1).getElevatorId(), t.floorPanel.pressButton(b, 2, Direction.UP).getAssignedElevatorId());
+        assertEquals(elevators.get(2).getElevatorId(), t.floorPanel.pressButton(b, 3, Direction.UP).getAssignedElevatorId());
+        assertEquals(elevators.get(0).getElevatorId(), t.floorPanel.pressButton(b, 4, Direction.UP).getAssignedElevatorId());
+    }
+
+    private static void leastBusyPrefersFewerStops() {
+        ElevatorSystemTest t = new ElevatorSystemTest(new LeastBusyStrategy());
+        String b = t.building(2);
+        Elevator e1 = t.controller.getElevators(b).get(0);
+        Elevator e2 = t.controller.getElevators(b).get(1);
+        t.elevatorPanel.pressFloorButton(e2.getElevatorId(), 10);
+        t.controller.runUntilIdle(b, 100);
+        // E1 is right next to floor 1 but already has two stops; idle E2 at floor 10 takes the call
+        t.elevatorPanel.pressFloorButton(e1.getElevatorId(), 8);
+        t.elevatorPanel.pressFloorButton(e1.getElevatorId(), 9);
+        ExternalRequest call = t.floorPanel.pressButton(b, 1, Direction.UP);
+        assertEquals(e2.getElevatorId(), call.getAssignedElevatorId());
+    }
+
+    private static void zoneBasedUsesZoneOwner() {
+        ElevatorSystemTest t = new ElevatorSystemTest(new ZoneBasedStrategy());
+        String b = t.building(3);
+        List<Elevator> elevators = t.controller.getElevators(b);
+        // floors 0-10 with 3 elevators: E1 owns 0-3, E2 owns 4-7, E3 owns 8-10
+        assertEquals(elevators.get(2).getElevatorId(), t.floorPanel.pressButton(b, 9, Direction.DOWN).getAssignedElevatorId());
+        assertEquals(elevators.get(1).getElevatorId(), t.floorPanel.pressButton(b, 5, Direction.UP).getAssignedElevatorId());
+        assertEquals(elevators.get(0).getElevatorId(), t.floorPanel.pressButton(b, 2, Direction.UP).getAssignedElevatorId());
+
+        // with E3 out of service, its zone falls back to another elevator
+        t.controller.startMaintenance(elevators.get(2).getElevatorId());
+        ExternalRequest call = t.floorPanel.pressButton(b, 10, Direction.DOWN);
+        assertTrue(call.getAssignedElevatorId() != null, "zone call should still be assigned");
+        assertTrue(!call.getAssignedElevatorId().equals(elevators.get(2).getElevatorId()), "E3 is in maintenance");
+        t.controller.runUntilIdle(b, 100);
+        assertEquals(RequestStatus.COMPLETED, call.getRequestStatus());
+    }
+
+    private static void strategySwitchAtRuntime() {
+        ElevatorSystemTest t = new ElevatorSystemTest();
+        String b = t.building(3);
+        List<Elevator> elevators = t.controller.getElevators(b);
+        // nearest: all idle at floor 0, tie broken by name -> E1
+        assertEquals(elevators.get(0).getElevatorId(), t.floorPanel.pressButton(b, 9, Direction.DOWN).getAssignedElevatorId());
+        t.controller.setSelectionStrategy(StrategyType.ZONE_BASED);
+        assertEquals(elevators.get(2).getElevatorId(), t.floorPanel.pressButton(b, 8, Direction.DOWN).getAssignedElevatorId());
+    }
+
+    private static void factoryBuildsEveryType() {
+        assertEquals(NearestElevatorStrategy.class, SelectionStrategyFactory.create(StrategyType.NEAREST).getClass());
+        assertEquals(RoundRobinStrategy.class, SelectionStrategyFactory.create(StrategyType.ROUND_ROBIN).getClass());
+        assertEquals(LeastBusyStrategy.class, SelectionStrategyFactory.create(StrategyType.LEAST_BUSY).getClass());
+        assertEquals(ZoneBasedStrategy.class, SelectionStrategyFactory.create(StrategyType.ZONE_BASED).getClass());
+        // a value read from config or the command line
+        assertEquals(ZoneBasedStrategy.class, SelectionStrategyFactory.create(" zone_based ").getClass());
+        assertThrows(() -> SelectionStrategyFactory.create("fastest"));
+        // every enum constant must be wired up, so a new type cannot be forgotten in the factory
+        for (StrategyType type : StrategyType.values()) {
+            assertTrue(SelectionStrategyFactory.create(type) != null, type + " has no strategy");
+        }
+    }
+
+    private static void concurrentDuplicatePresses() throws Exception {
+        ElevatorSystemTest t = new ElevatorSystemTest();
+        String b = t.building(3);
+        Set<String> ids = ConcurrentHashMap.newKeySet();
+        runConcurrently(16, i -> ids.add(t.floorPanel.pressButton(b, 6, Direction.UP).getId()));
+        assertEquals(1, ids.size());
+    }
+
+    private static void concurrentPressesWhileTicking() throws Exception {
+        ElevatorSystemTest t = new ElevatorSystemTest();
+        String b = t.building(3);
+        Queue<ExternalRequest> hallCalls = new ConcurrentLinkedQueue<>();
+        AtomicBoolean pressing = new AtomicBoolean(true);
+
+        Thread clock = new Thread(() -> {
+            while (pressing.get()) {
+                t.controller.tick(b);
+            }
+        });
+        clock.start();
+        try {
+            runConcurrently(8, thread -> {
+                Random random = new Random(thread);
+                for (int i = 0; i < 50; i++) {
+                    int floor = random.nextInt(11);
+                    Direction direction = floor == 10 || (floor > 0 && random.nextBoolean()) ? Direction.DOWN : Direction.UP;
+                    hallCalls.add(t.floorPanel.pressButton(b, floor, direction));
+                }
+            });
+        } finally {
+            pressing.set(false);
+            clock.join();
+        }
+
+        t.controller.runUntilIdle(b, 1000);
+        assertEquals(400, hallCalls.size());
+        assertTrue(hallCalls.stream().allMatch(r -> r.getRequestStatus() == RequestStatus.COMPLETED),
+                "every hall call should be completed");
+    }
+
     // --- helpers ---
+
+    private interface ThreadTask {
+        void run(int threadIndex) throws Exception;
+    }
+
+    /** Starts {@code threads} threads at the same instant and rethrows the first failure. */
+    private static void runConcurrently(int threads, ThreadTask task) throws Exception {
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                int index = i;
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    task.run(index);
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> future : futures) {
+                future.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
 
     private String building(int elevators) {
         Building building = controller.createBuilding("Test Tower", 0, 10, elevators, 8);
@@ -175,7 +338,11 @@ public class ElevatorSystemTest {
         return stops;
     }
 
-    private static int run(String name, Runnable test) {
+    private interface TestCase {
+        void run() throws Exception;
+    }
+
+    private static int run(String name, TestCase test) {
         try {
             test.run();
             System.out.println("PASS  " + name);

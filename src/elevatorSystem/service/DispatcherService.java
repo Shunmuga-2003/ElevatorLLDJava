@@ -16,7 +16,7 @@ public class DispatcherService {
     private final ElevatorRepository elevatorRepository;
     private final RequestService requestService;
     private final ElevatorSchedulerService schedulerService;
-    private ElevatorSelectionStrategy selectionStrategy;
+    private volatile ElevatorSelectionStrategy selectionStrategy;
 
     public DispatcherService(BuildingRepository buildingRepository,
                              ElevatorRepository elevatorRepository,

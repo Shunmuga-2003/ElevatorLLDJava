@@ -2,11 +2,13 @@ import elevatorSystem.ElevatorSystem;
 import elevatorSystem.Entity.Building;
 import elevatorSystem.Entity.Direction;
 import elevatorSystem.Entity.Elevator;
+import elevatorSystem.Entity.ElevatorState;
 import elevatorSystem.Entity.ExternalRequest;
 import elevatorSystem.Entity.RequestStatus;
 import elevatorSystem.controller.ElevatorController;
 import elevatorSystem.controller.ElevatorPanelController;
 import elevatorSystem.controller.FloorPanelController;
+import elevatorSystem.strategy.StrategyType;
 
 /** Runs a few scenarios end to end and prints what every elevator does on each tick. */
 public class Main {
@@ -48,7 +50,25 @@ public class Main {
         controller.runUntilIdle(buildingId, 50);
         controller.printStatus(buildingId);
 
-        section("4. Graceful shutdown");
+        section("4. The same calls under each dispatch strategy (switched at runtime)");
+        controller.getElevators(buildingId).stream()
+                .filter(e -> e.getElevatorState() == ElevatorState.MAINTENANCE)
+                .forEach(e -> controller.endMaintenance(e.getElevatorId()));
+        for (StrategyType type : StrategyType.values()) {
+            controller.setSelectionStrategy(type);
+            System.out.println("-- " + type);
+            for (ExternalRequest request : new ExternalRequest[]{
+                    floorPanel.pressButton(buildingId, 1, Direction.UP),
+                    floorPanel.pressButton(buildingId, 5, Direction.UP),
+                    floorPanel.pressButton(buildingId, 9, Direction.DOWN)}) {
+                System.out.printf("   floor %d %s -> %s%n", request.getFloorNumber(), request.getDirection(),
+                        nameOf(request.getAssignedElevatorId()));
+            }
+            controller.runUntilIdle(buildingId, 50);
+        }
+        controller.setSelectionStrategy(StrategyType.NEAREST);
+
+        section("5. Graceful shutdown");
         controller.stop(buildingId);
         try {
             floorPanel.pressButton(buildingId, 3, Direction.UP);
@@ -69,6 +89,14 @@ public class Main {
                 .filter(e -> e.getElevatorId().equals(request.getAssignedElevatorId()))
                 .findFirst()
                 .orElseThrow();
+    }
+
+    private static String nameOf(String elevatorId) {
+        return controller.getElevators(buildingId).stream()
+                .filter(e -> e.getElevatorId().equals(elevatorId))
+                .map(Elevator::getName)
+                .findFirst()
+                .orElse("(queued)");
     }
 
     private static void section(String title) {

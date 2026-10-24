@@ -3,6 +3,88 @@
 A low-level design of a multi-elevator controller for a building, implemented in plain Java 17 with no external dependencies.
 It models hall calls (UP/DOWN buttons on each floor) and car calls (floor buttons inside the cabin), dispatches each hall call to the best elevator, and moves every elevator with the **LOOK** scheduling algorithm on a tick-based simulation clock.
 
+## Problem Statement
+
+> **Design and implement the low-level design of an Elevator System for a building with multiple elevators.**
+>
+> A building has a fixed range of floors (it may include a basement / ground floor `0`) and `N` elevators.
+> People on any floor can call an elevator by pressing an **UP** or **DOWN** button in the hallway. Once inside,
+> they choose a destination by pressing a **floor button** in the cabin. The system must decide **which elevator**
+> answers each hallway call and **in what order** each elevator visits its stops, so that passengers are served
+> efficiently and correctly. The solution should be object-oriented, layered (controller → service → repository → entity),
+> extensible through design patterns, and demonstrable with a runnable simulation and tests.
+
+### Functional requirements
+
+1. **Building setup**
+   - Create a building with a name, a lowest floor, a highest floor, a number of elevators and a per-elevator capacity.
+   - The lowest floor must be below the highest floor and there must be at least one elevator.
+   - All elevators start parked and idle at the lowest floor, named `E1 … En`.
+2. **Hall calls (external requests)**
+   - A person on floor `f` presses **UP** or **DOWN**.
+   - The floor must exist; **UP is not allowed on the top floor** and **DOWN is not allowed on the bottom floor**.
+   - Pressing a button that is already lit (same floor + same direction, still active) must **not** create a duplicate. The existing request is returned.
+   - Each hall call must be assigned to exactly one elevator. If no elevator is available, the call stays **queued** and is retried on every clock tick.
+3. **Car calls (internal requests)**
+   - A passenger inside an elevator presses a destination floor.
+   - The floor must exist and the elevator must be in service.
+   - The elevator must stop at that floor whenever it reaches it.
+4. **Dispatching: choosing the elevator**
+   - Choose the elevator that can reach the caller in the **fewest floors of travel**.
+   - Prefer an elevator that is **already moving towards the caller in the caller's direction** (it picks them up "on the way").
+   - An elevator moving away from the caller pays the cost of finishing its sweep and coming back.
+   - Break ties by fewest pending stops, then by elevator name.
+   - Elevators in maintenance, inactive, or at full load are never chosen.
+   - The selection rule must be **pluggable** so other strategies (zoning, round-robin, energy-saving) can be swapped in.
+5. **Scheduling: order of stops (LOOK algorithm)**
+   - An elevator keeps travelling in its current direction while it has stops ahead, then reverses. If it has nothing to do, it goes idle.
+   - Car calls are served whenever the elevator passes that floor.
+   - A hall call is served only when the elevator is travelling in the **requested direction**, or at the floor where it turns around.
+     *Example: a DOWN call on floor 6 is not answered by an elevator passing floor 6 on its way up to floor 9.*
+   - An idle elevator with calls both above and below goes **up first**.
+6. **Movement simulation**
+   - Time advances in discrete **ticks**. On each tick an elevator does exactly one thing:
+     open its doors at a stop, close its doors, move one floor, or stay idle.
+   - Every movement is logged (`t=005 E1: moving UP 4 -> 5`).
+7. **Request lifecycle**
+   - Hall call: `QUEUED → ASSIGNED → COMPLETED`, going back to `QUEUED` if its elevator goes into maintenance.
+   - Car call: `PENDING → COMPLETED`, or `CANCELLED` if its elevator goes into maintenance.
+   - When an elevator stops at a floor, every request it serves there is marked `COMPLETED`.
+8. **Maintenance mode**
+   - An elevator can be taken out of service. Its pending car calls are cancelled, its hall calls are returned to the queue and immediately re-dispatched to another elevator.
+   - An elevator can be returned to service.
+9. **System start / graceful shutdown**
+   - A building starts `STOPPED` and accepts requests only while `RUNNING`.
+   - Stopping moves the building to `STOPPING`: new requests are rejected, but all outstanding requests are finished. Once everything is idle, the building becomes `STOPPED`.
+
+### Non-functional requirements
+
+- Plain **Java 17**, no external libraries or frameworks.
+- **Layered architecture** like a backend service: controllers expose the API, services hold business logic, repositories hide storage, entities hold state.
+- Storage behind **repository interfaces** with in-memory (`ConcurrentHashMap`) implementations, so a database can replace them later.
+- **Manual dependency injection** through constructors, with a single composition root (`ElevatorSystem`).
+- **Deterministic simulation** (tick-based clock) so behaviour is reproducible and testable.
+- Clear validation errors (`IllegalArgumentException` for bad input, `IllegalStateException` for invalid system state).
+
+### Expected deliverables
+
+- Entity model: `Building`, `Elevator`, `ExternalRequest`, `InternalRequest`, plus the enums `Direction`, `ElevatorState`, `RequestStatus` and `SystemState`.
+- Repositories, services, a selection strategy and controllers as described in [Architecture](#architecture).
+- A `Main` demo that runs these scenarios:
+  1. One person on floor 5 calls UP and travels to floor 9.
+  2. Several simultaneous calls (floor 2 UP, floor 7 DOWN, floor 10 DOWN) are spread across the best-placed elevators.
+  3. An elevator goes into maintenance and its hall call is handed to another elevator.
+  4. The same three calls dispatched under each strategy (Nearest, Round Robin, Least Busy, Zone Based), switched at runtime.
+  5. Graceful shutdown, after which a new request is rejected.
+- Unit tests covering dispatching, LOOK ordering, validation, duplicate merging, maintenance, shutdown,
+  each selection strategy, and concurrent button presses from many threads.
+
+### Assumptions
+
+- Moving one floor, opening the doors and closing the doors each take one tick.
+- Passenger load is tracked (`currentLoad` / `elevatorCapacity`) only to exclude full elevators from dispatch. Load is not simulated per stop.
+- One building is driven per simulation clock. Multiple buildings can be created, each with its own elevators.
+
 ## Features
 
 - Multiple elevators per building, with configurable floor range (e.g. basement `0` to `10`) and capacity
@@ -13,6 +95,8 @@ It models hall calls (UP/DOWN buttons on each floor) and car calls (floor button
 - **Maintenance mode** — taking an elevator out of service hands its hall calls to another elevator
 - **Graceful shutdown** — `RUNNING → STOPPING → STOPPED`: new requests are rejected and outstanding ones are finished first
 - Input validation (non-existent floors, UP from the top floor, DOWN from the bottom floor, …)
+- **Four pluggable dispatch strategies**: Nearest, Round Robin, Least Busy and Zone Based. They can be swapped at runtime with `ElevatorController.setSelectionStrategy`
+- **Thread-safe controllers**: button presses from many threads and the clock thread are serialised by one shared lock
 
 ## Architecture
 
@@ -35,11 +119,17 @@ src/
     │   └── MovementService           advances one elevator by one tick
     ├── strategy/
     │   ├── ElevatorSelectionStrategy
-    │   └── NearestElevatorStrategy
+    │   ├── NearestElevatorStrategy   fewest floors to reach the caller (default)
+    │   ├── RoundRobinStrategy        take turns: E1, E2, E3, E1, ...
+    │   ├── LeastBusyStrategy         fewest pending stops
+    │   ├── ZoneBasedStrategy         each elevator owns a band of floors
+    │   ├── StrategyType              enum: NEAREST, ROUND_ROBIN, LEAST_BUSY, ZONE_BASED
+    │   └── SelectionStrategyFactory  builds the strategy for a StrategyType (or a name from config)
     └── controller/
-        ├── ElevatorController        start/stop, maintenance, simulation clock
+        ├── ElevatorController        start/stop, maintenance, strategy switch, simulation clock
         ├── FloorPanelController      hall UP/DOWN buttons
-        └── ElevatorPanelController   floor buttons inside the cabin
+        ├── ElevatorPanelController   floor buttons inside the cabin
+        └── SystemLock                one fair lock shared by all controllers (thread safety)
 test/
 └── elevatorSystem/ElevatorSystemTest.java
 ```
@@ -87,6 +177,10 @@ classDiagram
     ElevatorController --> DispatcherService
     DispatcherService --> ElevatorSelectionStrategy
     NearestElevatorStrategy ..|> ElevatorSelectionStrategy
+    RoundRobinStrategy ..|> ElevatorSelectionStrategy
+    LeastBusyStrategy ..|> ElevatorSelectionStrategy
+    ZoneBasedStrategy ..|> ElevatorSelectionStrategy
+    ZoneBasedStrategy --> ElevatorSelectionStrategy : fallback
     DispatcherService --> ElevatorSchedulerService
     MovementService --> ElevatorSchedulerService
     MovementService --> RequestService
@@ -104,11 +198,61 @@ classDiagram
 
 | Pattern | Where |
 | --- | --- |
-| Strategy | `ElevatorSelectionStrategy` — swap the dispatch rule at runtime via `DispatcherService.setSelectionStrategy` |
+| Strategy | `ElevatorSelectionStrategy` with four implementations, swapped at runtime via `ElevatorController.setSelectionStrategy` |
+| Factory | `SelectionStrategyFactory.create(StrategyType)` is the only place that constructs strategies; callers pass an enum (or a config string) |
+| Decorator-style fallback | `ZoneBasedStrategy` wraps another strategy and delegates to it when the zone's elevator is unavailable |
 | Repository | `Repository/*` interfaces hide storage; the in-memory impls can be replaced with a database |
 | Dependency injection (manual) | every service receives its dependencies through the constructor; `ElevatorSystem` is the composition root |
-| State | `ElevatorState` / `SystemState` drive what an elevator or building may do next |
+| State machine (enum-based) | `ElevatorState` / `SystemState` enums drive what an elevator or building may do next. This is not the GoF State pattern with one class per state. |
 | Facade | `ElevatorController` exposes a small API over the services |
+
+### Dispatch strategies
+
+| Strategy | Picks | Good for | Trade-off |
+| --- | --- | --- | --- |
+| `NearestElevatorStrategy` (default) | lowest travel cost to the caller (see cost function below) | shortest waiting time | busy elevators near the caller keep getting more work |
+| `RoundRobinStrategy` | the next available elevator in turn | spreading wear evenly | ignores position, so a far elevator may be sent |
+| `LeastBusyStrategy` | fewest pending stops, distance breaks ties | rush hour, balancing load | may skip a closer but slightly busier elevator |
+| `ZoneBasedStrategy` | the elevator owning the caller's floor band, else a fallback (Nearest by default) | tall buildings, predictable service | an elevator's zone can be busy while others are idle |
+
+All strategies only see *available* elevators (not in maintenance, not full).
+
+**Choosing a strategy (Strategy + Factory).** Callers never construct a strategy class themselves. They ask for a type:
+
+```java
+ElevatorSystem system = new ElevatorSystem(StrategyType.ZONE_BASED, System.out::println); // at start-up
+controller.setSelectionStrategy(StrategyType.LEAST_BUSY);                                // at runtime
+controller.setSelectionStrategy(SelectionStrategyFactory.create(config.get("strategy"))); // from config
+```
+
+Why the setter is not enough on its own: with only `setSelectionStrategy(new ZoneBasedStrategy())`, every caller
+depends on every concrete class, and a value from a config file or admin screen cannot be turned into a strategy.
+The factory keeps that knowledge in one place, while the setter stays available for custom strategies
+that aren't built in (`setSelectionStrategy(ElevatorSelectionStrategy)`).
+
+**Adding a new strategy** takes three steps: write a class implementing
+`ElevatorSelectionStrategy.selectElevator(candidates, request, building)`, add a `StrategyType` constant,
+and add one `case` in `SelectionStrategyFactory`. The test `factory builds every strategy type` fails
+if a constant is added but not wired up. No controller or service changes are needed (Open/Closed principle).
+
+### Thread safety
+
+Real hall buttons are pressed from many places at once while the elevators keep moving.
+`FloorPanelController`, `ElevatorPanelController` and `ElevatorController` share one `SystemLock`
+(a fair `ReentrantLock`), and every public controller method runs under it:
+
+- **Pressing a button = create + dispatch as one atomic step.** If 16 people press floor 6 UP at the same moment,
+  only one request is created. With the lock disabled, the test sees up to 7 duplicate requests.
+- **Ticks and presses never interleave**, so an elevator's stop sets (`TreeSet`, not thread-safe) and request
+  statuses are only changed by one thread at a time.
+- **`runUntilIdle` takes the lock per tick**, not for the whole run, so presses from other threads still get through.
+- **Fair** ordering means a stream of presses cannot starve the clock thread.
+- `RoundRobinStrategy` keeps its counter in an `AtomicInteger`, and `DispatcherService.selectionStrategy` is `volatile`.
+
+**Trade-off:** one coarse lock is simple and obviously correct, but only one operation runs at a time.
+That's fine here because every operation is a few microseconds. At larger scale, the options are a lock per
+elevator (dispatch locks the chosen elevator only), or a single dispatcher thread that reads presses from a
+`BlockingQueue` (actor style, no locks in the services).
 
 ### Cost function (`NearestElevatorStrategy`)
 
@@ -160,6 +304,7 @@ t=014 E1: idle at floor 9
 ## Possible extensions
 
 - Load/weight sensing per stop (the `currentLoad` / `elevatorCapacity` fields already exclude full elevators from dispatch)
-- A real-time, multi-threaded clock instead of the deterministic tick loop
-- Additional strategies (e.g. zoning, round-robin, energy-saving)
+- A real-time clock thread (e.g. `ScheduledExecutorService`) instead of the deterministic tick loop. The controllers are already thread-safe for it.
+- More strategies, e.g. energy-saving (prefer elevators already moving) or peak-hour (send idle elevators to the lobby)
+- Finer-grained locking (one lock per elevator) if throughput ever matters
 - Emergency stop / fire mode
