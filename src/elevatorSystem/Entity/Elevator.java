@@ -37,6 +37,10 @@ public class Elevator {
         return !carCalls.isEmpty() || !upHallCalls.isEmpty() || !downHallCalls.isEmpty();
     }
 
+    public int getPendingStopCount() {
+        return carCalls.size() + upHallCalls.size() + downHallCalls.size();
+    }
+
     public boolean isAvailable() {
         return isActive && elevatorState != ElevatorState.MAINTENANCE && currentLoad < elevatorCapacity;
     }

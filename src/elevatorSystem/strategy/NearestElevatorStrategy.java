@@ -20,7 +20,7 @@ public class NearestElevatorStrategy implements ElevatorSelectionStrategy {
     public Optional<Elevator> selectElevator(List<Elevator> candidates, ExternalRequest request, Building building) {
         return candidates.stream()
                 .min(Comparator.<Elevator>comparingInt(e -> cost(e, request, building))
-                        .thenComparingInt(this::pendingStops)
+                        .thenComparingInt(Elevator::getPendingStopCount)
                         .thenComparing(Elevator::getName));
     }
 
@@ -48,9 +48,5 @@ public class NearestElevatorStrategy implements ElevatorSelectionStrategy {
             return toSweepEnd + Math.abs(sweepEnd - target);
         }
         return toSweepEnd + Math.abs(sweepEnd - otherEnd) + Math.abs(otherEnd - target);
-    }
-
-    private int pendingStops(Elevator elevator) {
-        return elevator.getCarCalls().size() + elevator.getUpHallCalls().size() + elevator.getDownHallCalls().size();
     }
 }

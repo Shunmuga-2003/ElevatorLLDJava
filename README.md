@@ -74,8 +74,10 @@ It models hall calls (UP/DOWN buttons on each floor) and car calls (floor button
   1. One person on floor 5 calls UP and travels to floor 9.
   2. Several simultaneous calls (floor 2 UP, floor 7 DOWN, floor 10 DOWN) are spread across the best-placed elevators.
   3. An elevator goes into maintenance and its hall call is handed to another elevator.
-  4. Graceful shutdown, after which a new request is rejected.
-- Unit tests covering dispatching, LOOK ordering, validation, duplicate merging, maintenance and shutdown.
+  4. The same three calls dispatched under each strategy (Nearest, Round Robin, Least Busy, Zone Based), switched at runtime.
+  5. Graceful shutdown, after which a new request is rejected.
+- Unit tests covering dispatching, LOOK ordering, validation, duplicate merging, maintenance, shutdown,
+  each selection strategy, and concurrent button presses from many threads.
 
 ### Assumptions
 
@@ -93,6 +95,8 @@ It models hall calls (UP/DOWN buttons on each floor) and car calls (floor button
 - **Maintenance mode** — taking an elevator out of service hands its hall calls to another elevator
 - **Graceful shutdown** — `RUNNING → STOPPING → STOPPED`: new requests are rejected and outstanding ones are finished first
 - Input validation (non-existent floors, UP from the top floor, DOWN from the bottom floor, …)
+- **Four pluggable dispatch strategies**: Nearest, Round Robin, Least Busy and Zone Based. They can be swapped at runtime with `ElevatorController.setSelectionStrategy`
+- **Thread-safe controllers**: button presses from many threads and the clock thread are serialised by one shared lock
 
 ## Architecture
 
@@ -115,11 +119,15 @@ src/
     │   └── MovementService           advances one elevator by one tick
     ├── strategy/
     │   ├── ElevatorSelectionStrategy
-    │   └── NearestElevatorStrategy
+    │   ├── NearestElevatorStrategy   fewest floors to reach the caller (default)
+    │   ├── RoundRobinStrategy        take turns: E1, E2, E3, E1, ...
+    │   ├── LeastBusyStrategy         fewest pending stops
+    │   └── ZoneBasedStrategy         each elevator owns a band of floors
     └── controller/
-        ├── ElevatorController        start/stop, maintenance, simulation clock
+        ├── ElevatorController        start/stop, maintenance, strategy switch, simulation clock
         ├── FloorPanelController      hall UP/DOWN buttons
-        └── ElevatorPanelController   floor buttons inside the cabin
+        ├── ElevatorPanelController   floor buttons inside the cabin
+        └── SystemLock                one fair lock shared by all controllers (thread safety)
 test/
 └── elevatorSystem/ElevatorSystemTest.java
 ```
@@ -167,6 +175,10 @@ classDiagram
     ElevatorController --> DispatcherService
     DispatcherService --> ElevatorSelectionStrategy
     NearestElevatorStrategy ..|> ElevatorSelectionStrategy
+    RoundRobinStrategy ..|> ElevatorSelectionStrategy
+    LeastBusyStrategy ..|> ElevatorSelectionStrategy
+    ZoneBasedStrategy ..|> ElevatorSelectionStrategy
+    ZoneBasedStrategy --> ElevatorSelectionStrategy : fallback
     DispatcherService --> ElevatorSchedulerService
     MovementService --> ElevatorSchedulerService
     MovementService --> RequestService
@@ -184,11 +196,44 @@ classDiagram
 
 | Pattern | Where |
 | --- | --- |
-| Strategy | `ElevatorSelectionStrategy` — swap the dispatch rule at runtime via `DispatcherService.setSelectionStrategy` |
+| Strategy | `ElevatorSelectionStrategy` with four implementations, swapped at runtime via `ElevatorController.setSelectionStrategy` |
+| Decorator-style fallback | `ZoneBasedStrategy` wraps another strategy and delegates to it when the zone's elevator is unavailable |
 | Repository | `Repository/*` interfaces hide storage; the in-memory impls can be replaced with a database |
 | Dependency injection (manual) | every service receives its dependencies through the constructor; `ElevatorSystem` is the composition root |
-| State | `ElevatorState` / `SystemState` drive what an elevator or building may do next |
+| State machine (enum-based) | `ElevatorState` / `SystemState` enums drive what an elevator or building may do next. This is not the GoF State pattern with one class per state. |
 | Facade | `ElevatorController` exposes a small API over the services |
+
+### Dispatch strategies
+
+| Strategy | Picks | Good for | Trade-off |
+| --- | --- | --- | --- |
+| `NearestElevatorStrategy` (default) | lowest travel cost to the caller (see cost function below) | shortest waiting time | busy elevators near the caller keep getting more work |
+| `RoundRobinStrategy` | the next available elevator in turn | spreading wear evenly | ignores position, so a far elevator may be sent |
+| `LeastBusyStrategy` | fewest pending stops, distance breaks ties | rush hour, balancing load | may skip a closer but slightly busier elevator |
+| `ZoneBasedStrategy` | the elevator owning the caller's floor band, else a fallback (Nearest by default) | tall buildings, predictable service | an elevator's zone can be busy while others are idle |
+
+All strategies only see *available* elevators (not in maintenance, not full). To add a new one, implement
+`ElevatorSelectionStrategy.selectElevator(candidates, request, building)` and pass it to `new ElevatorSystem(strategy, log)`
+or `ElevatorController.setSelectionStrategy(...)`.
+
+### Thread safety
+
+Real hall buttons are pressed from many places at once while the elevators keep moving.
+`FloorPanelController`, `ElevatorPanelController` and `ElevatorController` share one `SystemLock`
+(a fair `ReentrantLock`), and every public controller method runs under it:
+
+- **Pressing a button = create + dispatch as one atomic step.** If 16 people press floor 6 UP at the same moment,
+  only one request is created. With the lock disabled, the test sees up to 7 duplicate requests.
+- **Ticks and presses never interleave**, so an elevator's stop sets (`TreeSet`, not thread-safe) and request
+  statuses are only changed by one thread at a time.
+- **`runUntilIdle` takes the lock per tick**, not for the whole run, so presses from other threads still get through.
+- **Fair** ordering means a stream of presses cannot starve the clock thread.
+- `RoundRobinStrategy` keeps its counter in an `AtomicInteger`, and `DispatcherService.selectionStrategy` is `volatile`.
+
+**Trade-off:** one coarse lock is simple and obviously correct, but only one operation runs at a time.
+That's fine here because every operation is a few microseconds. At larger scale, the options are a lock per
+elevator (dispatch locks the chosen elevator only), or a single dispatcher thread that reads presses from a
+`BlockingQueue` (actor style, no locks in the services).
 
 ### Cost function (`NearestElevatorStrategy`)
 
@@ -240,6 +285,7 @@ t=014 E1: idle at floor 9
 ## Possible extensions
 
 - Load/weight sensing per stop (the `currentLoad` / `elevatorCapacity` fields already exclude full elevators from dispatch)
-- A real-time, multi-threaded clock instead of the deterministic tick loop
-- Additional strategies (e.g. zoning, round-robin, energy-saving)
+- A real-time clock thread (e.g. `ScheduledExecutorService`) instead of the deterministic tick loop. The controllers are already thread-safe for it.
+- More strategies, e.g. energy-saving (prefer elevators already moving) or peak-hour (send idle elevators to the lobby)
+- Finer-grained locking (one lock per elevator) if throughput ever matters
 - Emergency stop / fire mode

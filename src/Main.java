@@ -2,11 +2,17 @@ import elevatorSystem.ElevatorSystem;
 import elevatorSystem.Entity.Building;
 import elevatorSystem.Entity.Direction;
 import elevatorSystem.Entity.Elevator;
+import elevatorSystem.Entity.ElevatorState;
 import elevatorSystem.Entity.ExternalRequest;
 import elevatorSystem.Entity.RequestStatus;
 import elevatorSystem.controller.ElevatorController;
 import elevatorSystem.controller.ElevatorPanelController;
 import elevatorSystem.controller.FloorPanelController;
+import elevatorSystem.strategy.ElevatorSelectionStrategy;
+import elevatorSystem.strategy.LeastBusyStrategy;
+import elevatorSystem.strategy.NearestElevatorStrategy;
+import elevatorSystem.strategy.RoundRobinStrategy;
+import elevatorSystem.strategy.ZoneBasedStrategy;
 
 /** Runs a few scenarios end to end and prints what every elevator does on each tick. */
 public class Main {
@@ -48,7 +54,27 @@ public class Main {
         controller.runUntilIdle(buildingId, 50);
         controller.printStatus(buildingId);
 
-        section("4. Graceful shutdown");
+        section("4. The same calls under each dispatch strategy (switched at runtime)");
+        controller.getElevators(buildingId).stream()
+                .filter(e -> e.getElevatorState() == ElevatorState.MAINTENANCE)
+                .forEach(e -> controller.endMaintenance(e.getElevatorId()));
+        ElevatorSelectionStrategy[] strategies = {
+                new NearestElevatorStrategy(), new RoundRobinStrategy(), new LeastBusyStrategy(), new ZoneBasedStrategy()};
+        for (ElevatorSelectionStrategy strategy : strategies) {
+            controller.setSelectionStrategy(strategy);
+            System.out.println("-- " + strategy.getClass().getSimpleName());
+            for (ExternalRequest request : new ExternalRequest[]{
+                    floorPanel.pressButton(buildingId, 1, Direction.UP),
+                    floorPanel.pressButton(buildingId, 5, Direction.UP),
+                    floorPanel.pressButton(buildingId, 9, Direction.DOWN)}) {
+                System.out.printf("   floor %d %s -> %s%n", request.getFloorNumber(), request.getDirection(),
+                        nameOf(request.getAssignedElevatorId()));
+            }
+            controller.runUntilIdle(buildingId, 50);
+        }
+        controller.setSelectionStrategy(new NearestElevatorStrategy());
+
+        section("5. Graceful shutdown");
         controller.stop(buildingId);
         try {
             floorPanel.pressButton(buildingId, 3, Direction.UP);
@@ -69,6 +95,14 @@ public class Main {
                 .filter(e -> e.getElevatorId().equals(request.getAssignedElevatorId()))
                 .findFirst()
                 .orElseThrow();
+    }
+
+    private static String nameOf(String elevatorId) {
+        return controller.getElevators(buildingId).stream()
+                .filter(e -> e.getElevatorId().equals(elevatorId))
+                .map(Elevator::getName)
+                .findFirst()
+                .orElse("(queued)");
     }
 
     private static void section(String title) {

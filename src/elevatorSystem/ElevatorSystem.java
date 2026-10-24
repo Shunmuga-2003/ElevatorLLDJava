@@ -11,6 +11,7 @@ import elevatorSystem.Repository.impl.InternalRequestRepositoryImpl;
 import elevatorSystem.controller.ElevatorController;
 import elevatorSystem.controller.ElevatorPanelController;
 import elevatorSystem.controller.FloorPanelController;
+import elevatorSystem.controller.SystemLock;
 import elevatorSystem.service.BuildingService;
 import elevatorSystem.service.DispatcherService;
 import elevatorSystem.service.ElevatorSchedulerService;
@@ -47,10 +48,12 @@ public class ElevatorSystem {
                 requestService, schedulerService, strategy);
         MovementService movementService = new MovementService(schedulerService, requestService);
 
+        // all controllers share one lock, so button presses and clock ticks never interleave
+        SystemLock lock = new SystemLock();
         this.elevatorController = new ElevatorController(buildingService, elevatorService, requestService,
-                dispatcherService, movementService, log);
-        this.floorPanelController = new FloorPanelController(requestService, dispatcherService);
-        this.elevatorPanelController = new ElevatorPanelController(requestService);
+                dispatcherService, movementService, log, lock);
+        this.floorPanelController = new FloorPanelController(requestService, dispatcherService, lock);
+        this.elevatorPanelController = new ElevatorPanelController(requestService, lock);
     }
 
     public ElevatorController getElevatorController() {
