@@ -122,7 +122,9 @@ src/
     │   ├── NearestElevatorStrategy   fewest floors to reach the caller (default)
     │   ├── RoundRobinStrategy        take turns: E1, E2, E3, E1, ...
     │   ├── LeastBusyStrategy         fewest pending stops
-    │   └── ZoneBasedStrategy         each elevator owns a band of floors
+    │   ├── ZoneBasedStrategy         each elevator owns a band of floors
+    │   ├── StrategyType              enum: NEAREST, ROUND_ROBIN, LEAST_BUSY, ZONE_BASED
+    │   └── SelectionStrategyFactory  builds the strategy for a StrategyType (or a name from config)
     └── controller/
         ├── ElevatorController        start/stop, maintenance, strategy switch, simulation clock
         ├── FloorPanelController      hall UP/DOWN buttons
@@ -197,6 +199,7 @@ classDiagram
 | Pattern | Where |
 | --- | --- |
 | Strategy | `ElevatorSelectionStrategy` with four implementations, swapped at runtime via `ElevatorController.setSelectionStrategy` |
+| Factory | `SelectionStrategyFactory.create(StrategyType)` is the only place that constructs strategies; callers pass an enum (or a config string) |
 | Decorator-style fallback | `ZoneBasedStrategy` wraps another strategy and delegates to it when the zone's elevator is unavailable |
 | Repository | `Repository/*` interfaces hide storage; the in-memory impls can be replaced with a database |
 | Dependency injection (manual) | every service receives its dependencies through the constructor; `ElevatorSystem` is the composition root |
@@ -212,9 +215,25 @@ classDiagram
 | `LeastBusyStrategy` | fewest pending stops, distance breaks ties | rush hour, balancing load | may skip a closer but slightly busier elevator |
 | `ZoneBasedStrategy` | the elevator owning the caller's floor band, else a fallback (Nearest by default) | tall buildings, predictable service | an elevator's zone can be busy while others are idle |
 
-All strategies only see *available* elevators (not in maintenance, not full). To add a new one, implement
-`ElevatorSelectionStrategy.selectElevator(candidates, request, building)` and pass it to `new ElevatorSystem(strategy, log)`
-or `ElevatorController.setSelectionStrategy(...)`.
+All strategies only see *available* elevators (not in maintenance, not full).
+
+**Choosing a strategy (Strategy + Factory).** Callers never construct a strategy class themselves. They ask for a type:
+
+```java
+ElevatorSystem system = new ElevatorSystem(StrategyType.ZONE_BASED, System.out::println); // at start-up
+controller.setSelectionStrategy(StrategyType.LEAST_BUSY);                                // at runtime
+controller.setSelectionStrategy(SelectionStrategyFactory.create(config.get("strategy"))); // from config
+```
+
+Why the setter is not enough on its own: with only `setSelectionStrategy(new ZoneBasedStrategy())`, every caller
+depends on every concrete class, and a value from a config file or admin screen cannot be turned into a strategy.
+The factory keeps that knowledge in one place, while the setter stays available for custom strategies
+that aren't built in (`setSelectionStrategy(ElevatorSelectionStrategy)`).
+
+**Adding a new strategy** takes three steps: write a class implementing
+`ElevatorSelectionStrategy.selectElevator(candidates, request, building)`, add a `StrategyType` constant,
+and add one `case` in `SelectionStrategyFactory`. The test `factory builds every strategy type` fails
+if a constant is added but not wired up. No controller or service changes are needed (Open/Closed principle).
 
 ### Thread safety
 

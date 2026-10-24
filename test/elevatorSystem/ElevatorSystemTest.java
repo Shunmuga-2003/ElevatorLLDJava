@@ -15,6 +15,8 @@ import elevatorSystem.strategy.ElevatorSelectionStrategy;
 import elevatorSystem.strategy.LeastBusyStrategy;
 import elevatorSystem.strategy.NearestElevatorStrategy;
 import elevatorSystem.strategy.RoundRobinStrategy;
+import elevatorSystem.strategy.SelectionStrategyFactory;
+import elevatorSystem.strategy.StrategyType;
 import elevatorSystem.strategy.ZoneBasedStrategy;
 
 import java.util.ArrayList;
@@ -67,6 +69,7 @@ public class ElevatorSystemTest {
         failed += run("least busy prefers the elevator with fewer stops", ElevatorSystemTest::leastBusyPrefersFewerStops);
         failed += run("zone based sends calls to the zone's elevator", ElevatorSystemTest::zoneBasedUsesZoneOwner);
         failed += run("strategy can be switched at runtime", ElevatorSystemTest::strategySwitchAtRuntime);
+        failed += run("factory builds every strategy type", ElevatorSystemTest::factoryBuildsEveryType);
         failed += run("simultaneous presses of one button create one request", ElevatorSystemTest::concurrentDuplicatePresses);
         failed += run("presses from many threads while the clock runs are all served", ElevatorSystemTest::concurrentPressesWhileTicking);
 
@@ -231,8 +234,22 @@ public class ElevatorSystemTest {
         List<Elevator> elevators = t.controller.getElevators(b);
         // nearest: all idle at floor 0, tie broken by name -> E1
         assertEquals(elevators.get(0).getElevatorId(), t.floorPanel.pressButton(b, 9, Direction.DOWN).getAssignedElevatorId());
-        t.controller.setSelectionStrategy(new ZoneBasedStrategy());
+        t.controller.setSelectionStrategy(StrategyType.ZONE_BASED);
         assertEquals(elevators.get(2).getElevatorId(), t.floorPanel.pressButton(b, 8, Direction.DOWN).getAssignedElevatorId());
+    }
+
+    private static void factoryBuildsEveryType() {
+        assertEquals(NearestElevatorStrategy.class, SelectionStrategyFactory.create(StrategyType.NEAREST).getClass());
+        assertEquals(RoundRobinStrategy.class, SelectionStrategyFactory.create(StrategyType.ROUND_ROBIN).getClass());
+        assertEquals(LeastBusyStrategy.class, SelectionStrategyFactory.create(StrategyType.LEAST_BUSY).getClass());
+        assertEquals(ZoneBasedStrategy.class, SelectionStrategyFactory.create(StrategyType.ZONE_BASED).getClass());
+        // a value read from config or the command line
+        assertEquals(ZoneBasedStrategy.class, SelectionStrategyFactory.create(" zone_based ").getClass());
+        assertThrows(() -> SelectionStrategyFactory.create("fastest"));
+        // every enum constant must be wired up, so a new type cannot be forgotten in the factory
+        for (StrategyType type : StrategyType.values()) {
+            assertTrue(SelectionStrategyFactory.create(type) != null, type + " has no strategy");
+        }
     }
 
     private static void concurrentDuplicatePresses() throws Exception {

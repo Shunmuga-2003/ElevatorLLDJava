@@ -19,7 +19,8 @@ import elevatorSystem.service.ElevatorService;
 import elevatorSystem.service.MovementService;
 import elevatorSystem.service.RequestService;
 import elevatorSystem.strategy.ElevatorSelectionStrategy;
-import elevatorSystem.strategy.NearestElevatorStrategy;
+import elevatorSystem.strategy.SelectionStrategyFactory;
+import elevatorSystem.strategy.StrategyType;
 
 import java.util.function.Consumer;
 
@@ -30,7 +31,11 @@ public class ElevatorSystem {
     private final ElevatorPanelController elevatorPanelController;
 
     public ElevatorSystem(Consumer<String> log) {
-        this(new NearestElevatorStrategy(), log);
+        this(StrategyType.NEAREST, log);
+    }
+
+    public ElevatorSystem(StrategyType strategyType, Consumer<String> log) {
+        this(SelectionStrategyFactory.create(strategyType), log);
     }
 
     public ElevatorSystem(ElevatorSelectionStrategy strategy, Consumer<String> log) {

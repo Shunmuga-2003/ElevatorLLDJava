@@ -10,6 +10,8 @@ import elevatorSystem.service.ElevatorService;
 import elevatorSystem.service.MovementService;
 import elevatorSystem.service.RequestService;
 import elevatorSystem.strategy.ElevatorSelectionStrategy;
+import elevatorSystem.strategy.SelectionStrategyFactory;
+import elevatorSystem.strategy.StrategyType;
 
 import java.util.List;
 import java.util.function.Consumer;
@@ -60,6 +62,11 @@ public class ElevatorController {
     }
 
     /** Swaps the rule used to pick an elevator for new hall calls. Already-assigned calls keep their elevator. */
+    public void setSelectionStrategy(StrategyType type) {
+        setSelectionStrategy(SelectionStrategyFactory.create(type));
+    }
+
+    /** Same as {@link #setSelectionStrategy(StrategyType)}, for a custom strategy that is not one of the built-in types. */
     public void setSelectionStrategy(ElevatorSelectionStrategy strategy) {
         lock.run(() -> dispatcherService.setSelectionStrategy(strategy));
     }
