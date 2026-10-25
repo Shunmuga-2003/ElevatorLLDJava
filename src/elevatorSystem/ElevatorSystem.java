@@ -1,23 +1,27 @@
 package elevatorSystem;
 
-import elevatorSystem.Repository.BuildingRepository;
-import elevatorSystem.Repository.ElevatorRepository;
-import elevatorSystem.Repository.ExternalRequestRepository;
-import elevatorSystem.Repository.InternalRequestRepository;
-import elevatorSystem.Repository.impl.BuildingRepositoryImpl;
-import elevatorSystem.Repository.impl.ElevatorRepositoryImpl;
-import elevatorSystem.Repository.impl.ExternalRequestRepositoryImpl;
-import elevatorSystem.Repository.impl.InternalRequestRepositoryImpl;
+import elevatorSystem.controller.BuildingLocks;
 import elevatorSystem.controller.ElevatorController;
 import elevatorSystem.controller.ElevatorPanelController;
 import elevatorSystem.controller.FloorPanelController;
-import elevatorSystem.controller.SystemLock;
+import elevatorSystem.event.ElevatorEventListener;
+import elevatorSystem.event.EventPublisher;
+import elevatorSystem.event.LoggingListener;
+import elevatorSystem.event.WaitTimeMetrics;
+import elevatorSystem.repository.impl.BuildingRepositoryImpl;
+import elevatorSystem.repository.impl.ElevatorRepositoryImpl;
+import elevatorSystem.repository.impl.ExternalRequestRepositoryImpl;
+import elevatorSystem.repository.impl.InternalRequestRepositoryImpl;
 import elevatorSystem.service.BuildingService;
 import elevatorSystem.service.DispatcherService;
 import elevatorSystem.service.ElevatorSchedulerService;
 import elevatorSystem.service.ElevatorService;
 import elevatorSystem.service.MovementService;
 import elevatorSystem.service.RequestService;
+import elevatorSystem.repository.BuildingRepository;
+import elevatorSystem.repository.ElevatorRepository;
+import elevatorSystem.repository.ExternalRequestRepository;
+import elevatorSystem.repository.InternalRequestRepository;
 import elevatorSystem.strategy.ElevatorSelectionStrategy;
 import elevatorSystem.strategy.SelectionStrategyFactory;
 import elevatorSystem.strategy.StrategyType;
@@ -25,11 +29,13 @@ import elevatorSystem.strategy.StrategyType;
 import java.util.function.Consumer;
 
 /** Composition root: wires repositories, services and controllers together (manual dependency injection). */
-public class ElevatorSystem {
+public final class ElevatorSystem {
+    private final EventPublisher events = new EventPublisher();
     private final ElevatorController elevatorController;
     private final FloorPanelController floorPanelController;
     private final ElevatorPanelController elevatorPanelController;
 
+    /** Default strategy, every event logged to {@code log}. */
     public ElevatorSystem(Consumer<String> log) {
         this(StrategyType.NEAREST, log);
     }
@@ -39,26 +45,38 @@ public class ElevatorSystem {
     }
 
     public ElevatorSystem(ElevatorSelectionStrategy strategy, Consumer<String> log) {
+        this(strategy);
+        events.subscribe(new LoggingListener(log));
+    }
+
+    public ElevatorSystem(ElevatorSelectionStrategy strategy) {
         BuildingRepository buildingRepository = new BuildingRepositoryImpl();
         ElevatorRepository elevatorRepository = new ElevatorRepositoryImpl();
         ExternalRequestRepository externalRequestRepository = new ExternalRequestRepositoryImpl();
         InternalRequestRepository internalRequestRepository = new InternalRequestRepositoryImpl();
 
         ElevatorSchedulerService schedulerService = new ElevatorSchedulerService();
-        RequestService requestService = new RequestService(buildingRepository, elevatorRepository,
-                externalRequestRepository, internalRequestRepository, schedulerService);
-        ElevatorService elevatorService = new ElevatorService(elevatorRepository, requestService, schedulerService);
-        BuildingService buildingService = new BuildingService(buildingRepository, elevatorService);
-        DispatcherService dispatcherService = new DispatcherService(buildingRepository, elevatorRepository,
-                requestService, schedulerService, strategy);
-        MovementService movementService = new MovementService(schedulerService, requestService);
+        RequestService requestService = new RequestService(externalRequestRepository, internalRequestRepository);
+        ElevatorService elevatorService = new ElevatorService(elevatorRepository, requestService, events);
+        BuildingService buildingService = new BuildingService(buildingRepository, elevatorService, events);
+        DispatcherService dispatcherService = new DispatcherService(elevatorService, requestService, strategy);
+        MovementService movementService = new MovementService(schedulerService, requestService, events);
 
-        // all controllers share one lock, so button presses and clock ticks never interleave
-        SystemLock lock = new SystemLock();
+        WaitTimeMetrics metrics = new WaitTimeMetrics();
+        events.subscribe(metrics);
+
+        // one lock per building: presses and ticks of one building never interleave, buildings run in parallel
+        BuildingLocks locks = new BuildingLocks();
         this.elevatorController = new ElevatorController(buildingService, elevatorService, requestService,
-                dispatcherService, movementService, log, lock);
-        this.floorPanelController = new FloorPanelController(requestService, dispatcherService, lock);
-        this.elevatorPanelController = new ElevatorPanelController(requestService, lock);
+                dispatcherService, movementService, metrics, locks);
+        this.floorPanelController = new FloorPanelController(buildingService, requestService, dispatcherService, locks);
+        this.elevatorPanelController = new ElevatorPanelController(buildingService, elevatorService, requestService,
+                dispatcherService, locks);
+    }
+
+    /** Adds a subscriber to every event in every building (displays, audit logs, metrics exporters...). */
+    public void subscribe(ElevatorEventListener listener) {
+        events.subscribe(listener);
     }
 
     public ElevatorController getElevatorController() {

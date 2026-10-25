@@ -1,8 +1,8 @@
 package elevatorSystem.strategy;
 
-import elevatorSystem.Entity.Building;
-import elevatorSystem.Entity.Elevator;
-import elevatorSystem.Entity.ExternalRequest;
+import elevatorSystem.entity.Building;
+import elevatorSystem.entity.Elevator;
+import elevatorSystem.entity.ExternalRequest;
 
 import java.util.Comparator;
 import java.util.List;

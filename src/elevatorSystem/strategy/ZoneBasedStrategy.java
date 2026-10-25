@@ -1,8 +1,8 @@
 package elevatorSystem.strategy;
 
-import elevatorSystem.Entity.Building;
-import elevatorSystem.Entity.Elevator;
-import elevatorSystem.Entity.ExternalRequest;
+import elevatorSystem.entity.Building;
+import elevatorSystem.entity.Elevator;
+import elevatorSystem.entity.ExternalRequest;
 
 import java.util.List;
 import java.util.Optional;
@@ -38,6 +38,6 @@ public class ZoneBasedStrategy implements ElevatorSelectionStrategy {
     /** @return the zero-based zone index of {@code floor}. */
     int zoneOf(int floor, Building building) {
         int floors = building.getMaxFloor() - building.getMinFloor() + 1;
-        return (floor - building.getMinFloor()) * building.getTotalElevators() / floors;
+        return (floor - building.getMinFloor()) * building.getElevatorCount() / floors;
     }
 }

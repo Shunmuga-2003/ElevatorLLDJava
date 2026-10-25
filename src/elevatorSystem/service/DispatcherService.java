@@ -1,59 +1,45 @@
 package elevatorSystem.service;
 
-import elevatorSystem.Entity.Building;
-import elevatorSystem.Entity.Elevator;
-import elevatorSystem.Entity.ExternalRequest;
-import elevatorSystem.Entity.RequestStatus;
-import elevatorSystem.Repository.BuildingRepository;
-import elevatorSystem.Repository.ElevatorRepository;
+import elevatorSystem.entity.Building;
+import elevatorSystem.entity.Elevator;
+import elevatorSystem.entity.ExternalRequest;
+import elevatorSystem.entity.RequestStatus;
 import elevatorSystem.strategy.ElevatorSelectionStrategy;
 
 import java.util.Optional;
 
 /** Assigns hall calls to elevators. The selection rule is pluggable via {@link ElevatorSelectionStrategy}. */
 public class DispatcherService {
-    private final BuildingRepository buildingRepository;
-    private final ElevatorRepository elevatorRepository;
+    private final ElevatorService elevatorService;
     private final RequestService requestService;
-    private final ElevatorSchedulerService schedulerService;
     private volatile ElevatorSelectionStrategy selectionStrategy;
 
-    public DispatcherService(BuildingRepository buildingRepository,
-                             ElevatorRepository elevatorRepository,
-                             RequestService requestService,
-                             ElevatorSchedulerService schedulerService,
+    public DispatcherService(ElevatorService elevatorService, RequestService requestService,
                              ElevatorSelectionStrategy selectionStrategy) {
-        this.buildingRepository = buildingRepository;
-        this.elevatorRepository = elevatorRepository;
+        this.elevatorService = elevatorService;
         this.requestService = requestService;
-        this.schedulerService = schedulerService;
         this.selectionStrategy = selectionStrategy;
     }
 
+    /** Swaps the rule for new hall calls. Strategies are shared by all buildings, so they must be thread-safe. */
     public void setSelectionStrategy(ElevatorSelectionStrategy selectionStrategy) {
         this.selectionStrategy = selectionStrategy;
     }
 
     /** @return the elevator the request was assigned to, or empty if none is available (request stays queued). */
-    public Optional<Elevator> dispatch(ExternalRequest request) {
-        if (request.getRequestStatus() != RequestStatus.QUEUED) {
+    public Optional<Elevator> dispatch(Building building, ExternalRequest request) {
+        if (request.getStatus() != RequestStatus.QUEUED) {
             return Optional.empty();
         }
-        Building building = buildingRepository.getBuildingById(request.getBuildingId())
-                .orElseThrow(() -> new IllegalArgumentException("Unknown building " + request.getBuildingId()));
-
-        Optional<Elevator> selected = selectionStrategy.selectElevator(
-                elevatorRepository.findAvailableElevators(building.getId()), request, building);
-        selected.ifPresent(elevator -> {
-            request.setAssignedElevatorId(elevator.getElevatorId());
-            request.setRequestStatus(RequestStatus.ASSIGNED);
-            schedulerService.addHallCall(elevator, request.getFloorNumber(), request.getDirection());
-        });
+        ElevatorSelectionStrategy strategy = selectionStrategy; // read the volatile once
+        Optional<Elevator> selected = strategy.selectElevator(
+                elevatorService.findAvailableForDispatch(building.getId()), request, building);
+        selected.ifPresent(elevator -> requestService.assign(request, elevator));
         return selected;
     }
 
-    /** Retries every request that could not be assigned earlier. */
-    public void dispatchQueuedRequests(String buildingId) {
-        requestService.findQueuedRequests(buildingId).forEach(this::dispatch);
+    /** Retries every request that could not be assigned earlier, oldest first. */
+    public void dispatchQueued(Building building) {
+        requestService.findQueued(building.getId()).forEach(request -> dispatch(building, request));
     }
 }

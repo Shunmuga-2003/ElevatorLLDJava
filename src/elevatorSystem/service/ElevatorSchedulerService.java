@@ -1,42 +1,30 @@
 package elevatorSystem.service;
 
-import elevatorSystem.Entity.Direction;
-import elevatorSystem.Entity.Elevator;
+import elevatorSystem.entity.Direction;
+import elevatorSystem.entity.Elevator;
 
 import java.util.EnumSet;
 import java.util.Set;
 
 /**
- * Per-elevator stop scheduling using the LOOK algorithm: keep travelling in the current
- * direction while there are stops ahead, then reverse. Hall calls are only served while
- * travelling in the requested direction, or at the floor where the elevator turns around.
+ * Per-elevator stop scheduling using the LOOK algorithm: keep travelling in the current direction while
+ * there are stops ahead, then reverse. Hall calls are only served while travelling in the requested
+ * direction, or at the floor where the elevator turns around. Stateless: all state lives in {@link Elevator}.
  */
 public class ElevatorSchedulerService {
 
-    public void addHallCall(Elevator elevator, int floor, Direction direction) {
-        if (direction == Direction.UP) {
-            elevator.getUpHallCalls().add(floor);
-        } else {
-            elevator.getDownHallCalls().add(floor);
-        }
-    }
-
-    public void addCarCall(Elevator elevator, int floor) {
-        elevator.getCarCalls().add(floor);
-    }
-
     public boolean shouldStopAtCurrentFloor(Elevator elevator) {
         int floor = elevator.getCurrentFloor();
-        if (elevator.getCarCalls().contains(floor)) {
+        if (elevator.hasCarCall(floor)) {
             return true;
         }
-        boolean up = elevator.getUpHallCalls().contains(floor);
-        boolean down = elevator.getDownHallCalls().contains(floor);
+        boolean up = elevator.hasHallCall(floor, Direction.UP);
+        boolean down = elevator.hasHallCall(floor, Direction.DOWN);
         switch (elevator.getDirection()) {
             case UP:
-                return up || (down && !hasStopsAbove(elevator));
+                return up || (down && !elevator.hasStopsAbove());
             case DOWN:
-                return down || (up && !hasStopsBelow(elevator));
+                return down || (up && !elevator.hasStopsBelow());
             default:
                 return up || down;
         }
@@ -49,47 +37,27 @@ public class ElevatorSchedulerService {
     public Set<Direction> serveCurrentFloor(Elevator elevator) {
         int floor = elevator.getCurrentFloor();
         Direction direction = elevator.getDirection();
-        boolean serveUp = direction != Direction.DOWN || !hasStopsBelow(elevator);
-        boolean serveDown = direction != Direction.UP || !hasStopsAbove(elevator);
+        boolean serveUp = direction != Direction.DOWN || !elevator.hasStopsBelow();
+        boolean serveDown = direction != Direction.UP || !elevator.hasStopsAbove();
 
-        elevator.getCarCalls().remove(floor);
+        elevator.removeCarCall(floor);
         Set<Direction> served = EnumSet.noneOf(Direction.class);
-        if (serveUp && elevator.getUpHallCalls().remove(floor)) {
+        if (serveUp && elevator.removeHallCall(floor, Direction.UP)) {
             served.add(Direction.UP);
         }
-        if (serveDown && elevator.getDownHallCalls().remove(floor)) {
+        if (serveDown && elevator.removeHallCall(floor, Direction.DOWN)) {
             served.add(Direction.DOWN);
         }
         return served;
     }
 
     public Direction nextDirection(Elevator elevator) {
-        boolean above = hasStopsAbove(elevator);
-        boolean below = hasStopsBelow(elevator);
+        boolean above = elevator.hasStopsAbove();
+        boolean below = elevator.hasStopsBelow();
         if (elevator.getDirection() == Direction.DOWN) {
             return below ? Direction.DOWN : above ? Direction.UP : Direction.IDLE;
         }
         // UP keeps going up first; an IDLE elevator also prefers up when calls are on both sides
         return above ? Direction.UP : below ? Direction.DOWN : Direction.IDLE;
-    }
-
-    public void clearStops(Elevator elevator) {
-        elevator.getCarCalls().clear();
-        elevator.getUpHallCalls().clear();
-        elevator.getDownHallCalls().clear();
-    }
-
-    private boolean hasStopsAbove(Elevator elevator) {
-        int floor = elevator.getCurrentFloor();
-        return elevator.getCarCalls().higher(floor) != null
-                || elevator.getUpHallCalls().higher(floor) != null
-                || elevator.getDownHallCalls().higher(floor) != null;
-    }
-
-    private boolean hasStopsBelow(Elevator elevator) {
-        int floor = elevator.getCurrentFloor();
-        return elevator.getCarCalls().lower(floor) != null
-                || elevator.getUpHallCalls().lower(floor) != null
-                || elevator.getDownHallCalls().lower(floor) != null;
     }
 }
