@@ -1,16 +1,16 @@
 import elevatorSystem.ElevatorSystem;
-import elevatorSystem.Entity.Building;
-import elevatorSystem.Entity.Direction;
-import elevatorSystem.Entity.Elevator;
-import elevatorSystem.Entity.ElevatorState;
-import elevatorSystem.Entity.ExternalRequest;
-import elevatorSystem.Entity.RequestStatus;
 import elevatorSystem.controller.ElevatorController;
 import elevatorSystem.controller.ElevatorPanelController;
 import elevatorSystem.controller.FloorPanelController;
+import elevatorSystem.dto.ElevatorView;
+import elevatorSystem.dto.HallCallView;
+import elevatorSystem.entity.Direction;
+import elevatorSystem.entity.ElevatorState;
+import elevatorSystem.entity.RequestStatus;
+import elevatorSystem.event.WaitTimeMetrics;
 import elevatorSystem.strategy.StrategyType;
 
-/** Runs a few scenarios end to end and prints what every elevator does on each tick. */
+/** Runs the scenarios end to end and prints what every elevator does on each tick. */
 public class Main {
     private static ElevatorController controller;
     private static FloorPanelController floorPanel;
@@ -23,80 +23,104 @@ public class Main {
         floorPanel = system.getFloorPanelController();
         elevatorPanel = system.getElevatorPanelController();
 
-        Building building = controller.createBuilding("Tech Park", 0, 10, 3, 8);
-        buildingId = building.getId();
+        buildingId = controller.createBuilding("Tech Park", 0, 10, 3, 8).id();
         controller.start(buildingId);
-        controller.printStatus(buildingId);
+        System.out.println(controller.statusReport(buildingId));
 
         section("1. Someone on floor 5 wants to go up to floor 9");
-        ExternalRequest call = floorPanel.pressButton(buildingId, 5, Direction.UP);
-        Elevator car = waitForPickup(call);
-        elevatorPanel.pressFloorButton(car.getElevatorId(), 9);
+        HallCallView call = floorPanel.pressButton(buildingId, 5, Direction.UP);
+        ElevatorView car = waitForPickup(call);
+        elevatorPanel.pressFloorButton(car.elevatorId(), 9);
         controller.runUntilIdle(buildingId, 50);
 
-        section("2. Several people call at once; each call goes to the best-placed elevator");
+        section("2. An overloaded car holds its doors open; a full car hands its hall calls to another car");
+        call = floorPanel.pressButton(buildingId, 9, Direction.DOWN);
+        car = waitForPickup(call);
+        elevatorPanel.pressFloorButton(car.elevatorId(), 0);
+        HallCallView onTheWay = floorPanel.pressButton(buildingId, 6, Direction.DOWN);
+        System.out.printf("floor 6 DOWN -> %s (on its way down)%n", nameOf(onTheWay.assignedElevatorId()));
+        elevatorPanel.reportLoad(car.elevatorId(), 9);  // one too many got in: doors stay open, hall calls go elsewhere
+        controller.tick(buildingId);
+        elevatorPanel.reportLoad(car.elevatorId(), 8);  // one steps out: still full, so it keeps bypassing hall calls
+        System.out.printf("floor 6 DOWN -> %s (E1 is full)%n",
+                nameOf(controller.getHallCall(onTheWay.id()).assignedElevatorId()));
+        controller.runUntilIdle(buildingId, 50);
+        elevatorPanel.reportLoad(car.elevatorId(), 0);  // everyone got out at the ground floor
+
+        section("3. Several people call at once; each call goes to the car with the lowest ETA");
         call = floorPanel.pressButton(buildingId, 2, Direction.UP);
         floorPanel.pressButton(buildingId, 7, Direction.DOWN);
         floorPanel.pressButton(buildingId, 10, Direction.DOWN);
         car = waitForPickup(call);
-        elevatorPanel.pressFloorButton(car.getElevatorId(), 6);
+        elevatorPanel.pressFloorButton(car.elevatorId(), 6);
         controller.runUntilIdle(buildingId, 50);
-        controller.printStatus(buildingId);
+        System.out.println(controller.statusReport(buildingId));
 
-        section("3. An elevator goes into maintenance; its hall call is handed to another elevator");
-        Elevator e1 = controller.getElevators(buildingId).get(0);
-        call = floorPanel.pressButton(buildingId, e1.getCurrentFloor() == 0 ? 4 : 0, Direction.UP);
-        controller.startMaintenance(call.getAssignedElevatorId());
+        section("4. An elevator goes into maintenance; its hall call is handed to another elevator");
+        call = floorPanel.pressButton(buildingId, 4, Direction.UP);
+        controller.startMaintenance(call.assignedElevatorId());
         controller.runUntilIdle(buildingId, 50);
-        controller.printStatus(buildingId);
-
-        section("4. The same calls under each dispatch strategy (switched at runtime)");
+        System.out.println(controller.statusReport(buildingId));
         controller.getElevators(buildingId).stream()
-                .filter(e -> e.getElevatorState() == ElevatorState.MAINTENANCE)
-                .forEach(e -> controller.endMaintenance(e.getElevatorId()));
+                .filter(e -> e.state() == ElevatorState.MAINTENANCE)
+                .forEach(e -> controller.endMaintenance(e.elevatorId()));
+
+        section("5. The same calls under each dispatch strategy (switched at runtime)");
         for (StrategyType type : StrategyType.values()) {
             controller.setSelectionStrategy(type);
             System.out.println("-- " + type);
-            for (ExternalRequest request : new ExternalRequest[]{
+            for (HallCallView request : new HallCallView[]{
                     floorPanel.pressButton(buildingId, 1, Direction.UP),
                     floorPanel.pressButton(buildingId, 5, Direction.UP),
                     floorPanel.pressButton(buildingId, 9, Direction.DOWN)}) {
-                System.out.printf("   floor %d %s -> %s%n", request.getFloorNumber(), request.getDirection(),
-                        nameOf(request.getAssignedElevatorId()));
+                System.out.printf("   floor %d %s -> %s%n", request.floor(), request.direction(),
+                        nameOf(request.assignedElevatorId()));
             }
             controller.runUntilIdle(buildingId, 50);
         }
         controller.setSelectionStrategy(StrategyType.NEAREST);
 
-        section("5. Graceful shutdown");
+        section("6. Fire alarm: every car is recalled to the lobby and new calls are refused");
+        floorPanel.pressButton(buildingId, 7, Direction.DOWN);
+        controller.tick(buildingId);
+        controller.emergencyRecall(buildingId);
+        try {
+            floorPanel.pressButton(buildingId, 3, Direction.UP);
+        } catch (IllegalStateException e) {
+            System.out.println("Rejected: " + e.getMessage());
+        }
+        controller.runUntilIdle(buildingId, 50);
+        System.out.println(controller.statusReport(buildingId));
+        controller.clearEmergency(buildingId);
+
+        section("7. Wait-time metrics");
+        WaitTimeMetrics.Stats stats = controller.getWaitTimeStats(buildingId);
+        System.out.printf("%d hall calls served, average wait %.1f ticks, worst %d ticks%n",
+                stats.served(), stats.averageWaitTicks(), stats.maxWaitTicks());
+
+        section("8. Graceful shutdown");
         controller.stop(buildingId);
         try {
             floorPanel.pressButton(buildingId, 3, Direction.UP);
         } catch (IllegalStateException e) {
             System.out.println("Rejected: " + e.getMessage());
         }
-        controller.printStatus(buildingId);
+        System.out.println(controller.statusReport(buildingId));
     }
 
-    private static Elevator waitForPickup(ExternalRequest request) {
-        for (int i = 0; i < 50 && request.getRequestStatus() != RequestStatus.COMPLETED; i++) {
+    private static ElevatorView waitForPickup(HallCallView request) {
+        for (int i = 0; i < 50 && controller.getHallCall(request.id()).status() != RequestStatus.COMPLETED; i++) {
             controller.tick(buildingId);
         }
-        if (request.getRequestStatus() != RequestStatus.COMPLETED) {
-            throw new IllegalStateException("Request on floor " + request.getFloorNumber() + " was never served");
+        HallCallView served = controller.getHallCall(request.id());
+        if (served.status() != RequestStatus.COMPLETED) {
+            throw new IllegalStateException("Request on floor " + request.floor() + " was never served");
         }
-        return controller.getElevators(buildingId).stream()
-                .filter(e -> e.getElevatorId().equals(request.getAssignedElevatorId()))
-                .findFirst()
-                .orElseThrow();
+        return controller.getElevator(served.assignedElevatorId());
     }
 
     private static String nameOf(String elevatorId) {
-        return controller.getElevators(buildingId).stream()
-                .filter(e -> e.getElevatorId().equals(elevatorId))
-                .map(Elevator::getName)
-                .findFirst()
-                .orElse("(queued)");
+        return elevatorId == null ? "(queued)" : controller.getElevator(elevatorId).name();
     }
 
     private static void section(String title) {
